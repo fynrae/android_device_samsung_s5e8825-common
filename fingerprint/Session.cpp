@@ -20,6 +20,8 @@
 #include <string>
 #include <thread>
 
+#include <unistd.h>
+
 using namespace ::android::fingerprint::samsung;
 using namespace ::std::chrono_literals;
 
@@ -237,8 +239,8 @@ ndk::ScopedAStatus Session::onPointerDown(int32_t /*pointerId*/, int32_t /*x*/, 
             }
         }
 
-        if (currentBrightness < 290) {
-            mBrightnessRestore->set(290);
+        if (currentBrightness < 486) {
+            mBrightnessRestore->set(486);
         } else {
             mBrightnessRestore->set(currentBrightness);
         }

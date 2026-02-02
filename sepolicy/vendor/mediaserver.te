@@ -1,1 +1,3 @@
-allow mediaserver media_quality_service:service_manager find;
+type vendor_media_quality_service, service_manager_type;
+allow mediaserver vendor_media_quality_service:service_manager find;
+
