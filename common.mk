@@ -287,6 +287,7 @@ PRODUCT_PACKAGES += SamsungDoze
 # Sensors
 PRODUCT_PACKAGES += android.hardware.sensors-service.samsung-multihal
 PRODUCT_PACKAGES += libshim_sensorndkbridge
+PRODUCT_PACKAGES += init.s5e8825.sensors.rc
 
 # Soong namespaces
 PRODUCT_SOONG_NAMESPACES += \
