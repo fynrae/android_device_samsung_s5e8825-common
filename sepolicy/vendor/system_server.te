@@ -1,5 +1,4 @@
 allow system_server audioserver_tmpfs:file write;
-allow system_server self:capability sys_module;
 
 dontaudit system_server sysfs:file { getattr open read };
 dontaudit system_server tmpfs:file write;
