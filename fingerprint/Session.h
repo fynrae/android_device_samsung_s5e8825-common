@@ -13,7 +13,6 @@
 
 #include "LegacyHAL.h"
 #include "LockoutTracker.h"
-#include "TimedRestore.h"
 #include "UdfpsHandler.h"
 
 #define FINGERPRINT_DATA_DIR "/data/vendor/biometrics/fp/User_%d/"
@@ -83,6 +82,12 @@ class Session : public BnSession {
     void clearLockout(bool clearAttemptCounter);
     void startLockoutTimer(int64_t timeout);
     void lockoutTimerExpired();
+    bool cacheUdfpsSmoothDim();
+    bool setUdfpsSmoothDim(int value);
+    bool prepareUdfpsDisplayState();
+    void restoreUdfpsSmoothDim();
+    void restoreUdfpsDisplayState();
+    void deferUdfpsSmoothDimRestore();
 
     // lockout timer
     bool mIsLockoutTimerStarted = false;
@@ -96,10 +101,14 @@ class Session : public BnSession {
     // Practically, it means that this callback should always be called from the worker thread.
     std::shared_ptr<ISessionCallback> mCb;
 
+    int mCachedUdfpsSmoothDim = -1;
+    bool mUdfpsPointerDown = false;
+    bool mUdfpsSmoothDimDisabled = false;
+    bool mUdfpsSmoothDimRestorePending = false;
+
     // Binder death handler.
     AIBinder_DeathRecipient* mDeathRecipient;
 
-    std::unique_ptr<TimedRestore> mBrightnessRestore;
     std::unique_ptr<UdfpsHandler> mUdfpsHandler;
 };
 

@@ -7,7 +7,6 @@
 #include "Session.h"
 #include "CancellationSignal.h"
 #include "Legacy2Aidl.h"
-#include "TimedRestore.h"
 #include "VendorConstants.h"
 
 #include <fingerprint.sysprop.h>
@@ -22,6 +21,10 @@
 
 using namespace ::android::fingerprint::samsung;
 using namespace ::std::chrono_literals;
+
+namespace {
+constexpr char kUdfpsSmoothDimPath[] = "/sys/class/lcd/panel/smooth_dim";
+}
 
 namespace aidl {
 namespace android {
@@ -83,6 +86,10 @@ ndk::ScopedAStatus Session::enroll(const HardwareAuthToken& hat,
         mUdfpsHandler->setFodPress(true);
     }
 
+    if (FingerprintHalProperties::type().value_or("") == "udfps_optical") {
+        prepareUdfpsDisplayState();
+    }
+
     if (FingerprintHalProperties::force_calibrate().value_or(false)) {
         mCaptureReady = false;
         mHal.request(SEM_REQUEST_FORCE_CBGE, 1);
@@ -94,6 +101,7 @@ ndk::ScopedAStatus Session::enroll(const HardwareAuthToken& hat,
     int32_t error = mHal.ss_fingerprint_enroll(&authToken, mUserId, 0 /* timeoutSec */);
     if (error) {
         LOG(ERROR) << "ss_fingerprint_enroll failed: " << error;
+        restoreUdfpsDisplayState();
         mCb->onError(Error::UNABLE_TO_PROCESS, error);
     }
 
@@ -115,9 +123,14 @@ ndk::ScopedAStatus Session::authenticate(int64_t operationId,
         mUdfpsHandler->setFodPress(true);
     }
 
+    if (FingerprintHalProperties::type().value_or("") == "udfps_optical") {
+        prepareUdfpsDisplayState();
+    }
+
     int32_t error = mHal.ss_fingerprint_authenticate(operationId, mUserId);
     if (error) {
         LOG(ERROR) << "ss_fingerprint_authenticate failed: " << error;
+        restoreUdfpsDisplayState();
         mCb->onError(Error::UNABLE_TO_PROCESS, error);
     }
 
@@ -208,6 +221,7 @@ ndk::ScopedAStatus Session::resetLockout(const HardwareAuthToken& /*hat*/) {
 
 ndk::ScopedAStatus Session::close() {
     LOG(INFO) << "close";
+    restoreUdfpsDisplayState();
     mClosed = true;
     mCb->onSessionClosed();
     AIBinder_DeathRecipient_delete(mDeathRecipient);
@@ -220,21 +234,12 @@ ndk::ScopedAStatus Session::onPointerDown(int32_t /*pointerId*/, int32_t /*x*/, 
 
     std::string sensorTypeProp = FingerprintHalProperties::type().value_or("");
     if (sensorTypeProp == "udfps_optical") {
-        mBrightnessRestore =
-                std::make_unique<TimedRestore>("/sys/class/backlight/panel/brightness");
-
-        int currentBrightness = 0;
-        {
-            std::ifstream infile("/sys/class/backlight/panel/brightness");
-            if (infile.is_open()) {
-                infile >> currentBrightness;
+        if (!mUdfpsPointerDown) {
+            // smooth_dim is prepared once when the session starts. Keep it disabled
+            // across repeated taps so the touch path has no mode-switch race.
+            if (mUdfpsSmoothDimDisabled || prepareUdfpsDisplayState()) {
+                mUdfpsPointerDown = true;
             }
-        }
-
-        if (currentBrightness < 486) {
-            mBrightnessRestore->set(486);
-        } else {
-            mBrightnessRestore->set(currentBrightness);
         }
     }
 
@@ -251,7 +256,7 @@ ndk::ScopedAStatus Session::onPointerUp(int32_t /*pointerId*/) {
 
     std::string sensorTypeProp = FingerprintHalProperties::type().value_or("");
     if (sensorTypeProp == "udfps_optical") {
-        mBrightnessRestore.reset();
+        mUdfpsPointerDown = false;
     }
 
     if (FingerprintHalProperties::request_touch_event().value_or(false)) {
@@ -264,7 +269,12 @@ ndk::ScopedAStatus Session::onPointerUp(int32_t /*pointerId*/) {
 ndk::ScopedAStatus Session::onUiReady() {
     LOG(INFO) << "onUiReady";
 
-    // TODO: stub
+    if (FingerprintHalProperties::type().value_or("") == "udfps_optical") {
+        if (!mUdfpsPointerDown && mUdfpsSmoothDimRestorePending) {
+            restoreUdfpsSmoothDim();
+            mUdfpsSmoothDimRestorePending = mUdfpsSmoothDimDisabled;
+        }
+    }
 
     return ndk::ScopedAStatus::ok();
 }
@@ -299,6 +309,9 @@ ndk::ScopedAStatus Session::onContextChanged(const OperationContext& /*context*/
 }
 
 ndk::ScopedAStatus Session::onPointerCancelWithContext(const PointerContext& /*context*/) {
+    if (FingerprintHalProperties::type().value_or("") == "udfps_optical") {
+        restoreUdfpsDisplayState();
+    }
     return ndk::ScopedAStatus::ok();
 }
 
@@ -311,7 +324,7 @@ ndk::ScopedAStatus Session::cancel() {
 
     std::string sensorTypeProp = FingerprintHalProperties::type().value_or("");
     if (sensorTypeProp == "udfps_optical") {
-        mBrightnessRestore.reset();
+        restoreUdfpsDisplayState();
     }
 
     if (ret == 0) {
@@ -321,6 +334,78 @@ ndk::ScopedAStatus Session::cancel() {
     } else {
         return ndk::ScopedAStatus::fromServiceSpecificError(ret);
     }
+}
+
+bool Session::cacheUdfpsSmoothDim() {
+    std::ifstream ifs(kUdfpsSmoothDimPath);
+    if (!(ifs >> mCachedUdfpsSmoothDim)) {
+        mCachedUdfpsSmoothDim = -1;
+        LOG(ERROR) << "Unable to read " << kUdfpsSmoothDimPath;
+        return false;
+    }
+
+    return true;
+}
+
+bool Session::setUdfpsSmoothDim(int value) {
+    std::ofstream ofs(kUdfpsSmoothDimPath);
+    if (!ofs) {
+        LOG(ERROR) << "Unable to write " << kUdfpsSmoothDimPath;
+        return false;
+    }
+
+    ofs << value << std::endl;
+    if (!ofs) {
+        LOG(ERROR) << "Unable to set " << kUdfpsSmoothDimPath << " to " << value;
+        return false;
+    }
+
+    return true;
+}
+
+bool Session::prepareUdfpsDisplayState() {
+    if (mUdfpsSmoothDimDisabled) {
+        mUdfpsSmoothDimRestorePending = false;
+        return true;
+    }
+
+    if (mCachedUdfpsSmoothDim < 0 && !cacheUdfpsSmoothDim()) {
+        LOG(ERROR) << "Unable to prepare UDFPS smooth dim state";
+        return false;
+    }
+
+    if (!setUdfpsSmoothDim(0)) {
+        LOG(ERROR) << "Unable to disable UDFPS smooth dim";
+        mCachedUdfpsSmoothDim = -1;
+        return false;
+    }
+
+    mUdfpsSmoothDimDisabled = true;
+    mUdfpsSmoothDimRestorePending = false;
+    LOG(INFO) << "Prepared UDFPS display state: smooth_dim=" << mCachedUdfpsSmoothDim
+              << " -> 0";
+    return true;
+}
+
+void Session::restoreUdfpsSmoothDim() {
+    if (mCachedUdfpsSmoothDim < 0) return;
+
+    if (setUdfpsSmoothDim(mCachedUdfpsSmoothDim)) {
+        LOG(INFO) << "Restored UDFPS smooth_dim=" << mCachedUdfpsSmoothDim;
+        mCachedUdfpsSmoothDim = -1;
+        mUdfpsSmoothDimDisabled = false;
+    }
+}
+
+void Session::restoreUdfpsDisplayState() {
+    restoreUdfpsSmoothDim();
+    mUdfpsPointerDown = false;
+    mUdfpsSmoothDimRestorePending = false;
+}
+
+void Session::deferUdfpsSmoothDimRestore() {
+    mUdfpsPointerDown = false;
+    mUdfpsSmoothDimRestorePending = mUdfpsSmoothDimDisabled;
 }
 
 binder_status_t Session::linkToDeath(AIBinder* binder) {
@@ -442,7 +527,7 @@ void Session::notify(const fingerprint_msg_t* msg) {
 
             std::string sensorTypeProp = FingerprintHalProperties::type().value_or("");
             if (sensorTypeProp == "udfps_optical") {
-                mBrightnessRestore.reset();
+                deferUdfpsSmoothDimRestore();
             }
 
             mCb->onError(result, vendorCode);
@@ -490,7 +575,7 @@ void Session::notify(const fingerprint_msg_t* msg) {
 
                 std::string sensorTypeProp = FingerprintHalProperties::type().value_or("");
                 if (sensorTypeProp == "udfps_optical") {
-                    mBrightnessRestore.reset();
+                    deferUdfpsSmoothDimRestore();
                 }
 
                 mCb->onAuthenticationSucceeded(msg->data.authenticated.finger.fid, authToken);
