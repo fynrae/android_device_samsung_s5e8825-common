@@ -992,6 +992,8 @@ on fs
     chown system system /sys/class/backlight/panel/brightness
 
     # Permissions for LCD
+    chown system system /sys/class/lcd/panel/smooth_dim
+    chmod 0660 /sys/class/lcd/panel/smooth_dim
     chown system radio /sys/class/lcd/panel/manufacture_code
     chown system radio /sys/class/lcd/panel/lcd_type
     chown system system /sys/class/lcd/panel/siop_enable
